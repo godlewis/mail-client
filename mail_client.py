@@ -10,6 +10,8 @@ import email.utils
 import re
 import quopri
 import base64
+import sys
+import poplib
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -51,6 +53,19 @@ class MailClient:
             return conn
         except Exception as e:
             logger.error(f"连接数据库失败: {str(e)}")
+            raise
+
+    def connect_to_pop3(self):
+        """连接到POP3邮箱服务器"""
+        try:
+            pop3_host = os.getenv('POP3_HOST', self.email_host)
+            pop3_port = int(os.getenv('POP3_PORT', self.email_port))
+            pop = poplib.POP3_SSL(pop3_host, pop3_port)
+            pop.user(self.email_user)
+            pop.pass_(self.email_password)
+            return pop
+        except Exception as e:
+            logger.error(f"连接POP3邮箱服务器失败: {str(e)}")
             raise
 
     def decode_email_header(self, header):
@@ -182,8 +197,8 @@ class MailClient:
         finally:
             cursor.close()
 
-    def process_emails(self):
-        """处理邮件"""
+    def process_emails(self, start_date=None, end_date=None):
+        """处理邮件，可选日期过滤"""
         mail = self.connect_to_mailbox()
         conn = self.connect_to_database()
         
@@ -210,6 +225,14 @@ class MailClient:
                     # 解析日期
                     date_str = message.get('Date', '')
                     received_date = self.parse_date(date_str)
+                    if received_date.tzinfo is not None:
+                        received_date = received_date.replace(tzinfo=None)
+                    
+                    # 日期过滤
+                    if start_date and received_date < start_date:
+                        continue
+                    if end_date and received_date > end_date:
+                        continue
                     
                     # 获取邮件内容
                     content = self.get_email_content(message)
@@ -240,6 +263,90 @@ class MailClient:
             mail.logout()
             conn.close()
 
+    def process_emails_pop3(self, start_date=None, end_date=None):
+        """使用POP3协议处理邮件，可选日期过滤"""
+        pop = self.connect_to_pop3()
+        conn = self.connect_to_database()
+        try:
+            num_messages = len(pop.list()[1])
+            logger.info(f"POP3找到 {num_messages} 封邮件")
+            for i in range(num_messages):
+                try:
+                    resp, lines, octets = pop.retr(i+1)
+                    msg_content = b'\r\n'.join(lines)
+                    message = email.message_from_bytes(msg_content)
+
+                    # 获取邮件ID
+                    message_id = message.get('Message-ID', '')
+                    if not message_id:
+                        message_id = f"NO_ID_{i+1}"
+
+                    # 解析日期
+                    date_str = message.get('Date', '')
+                    received_date = self.parse_date(date_str)
+                    if received_date.tzinfo is not None:
+                        received_date = received_date.replace(tzinfo=None)
+
+                    # 日期过滤
+                    if start_date and received_date < start_date:
+                        continue
+                    if end_date and received_date > end_date:
+                        continue
+
+                    # 获取邮件内容
+                    content = self.get_email_content(message)
+                    logger.info(f"邮件内容长度: {len(content)}")
+
+                    email_data = {
+                        'message_id': message_id,
+                        'subject': self.decode_email_header(message.get('Subject', '')),
+                        'sender': self.decode_email_header(message.get('From', '')),
+                        'recipients': self.decode_email_header(message.get('To', '')),
+                        'cc': self.decode_email_header(message.get('Cc', '')),
+                        'bcc': self.decode_email_header(message.get('Bcc', '')),
+                        'content': content,
+                        'received_date': received_date
+                    }
+
+                    logger.info(f"正在处理邮件: {email_data['subject']} (ID: {message_id})")
+                    self.save_email_to_db(conn, email_data)
+                except Exception as e:
+                    logger.error(f"处理邮件 {i+1} 时发生错误: {str(e)}")
+                    continue
+        except Exception as e:
+            logger.error(f"POP3处理邮件时发生错误: {str(e)}")
+        finally:
+            pop.quit()
+            conn.close()
+
 if __name__ == "__main__":
+    # 支持命令行参数：起始日期和结束日期、协议类型
+    start_date = None
+    end_date = None
+    protocol = "imap"
+    args = sys.argv
+    if len(args) == 4:
+        try:
+            start_date = datetime.strptime(args[1], "%Y-%m-%d")
+            end_date = datetime.strptime(args[2], "%Y-%m-%d")
+            protocol = args[3].lower()
+        except Exception as e:
+            print("日期格式错误，应为 YYYY-MM-DD")
+            sys.exit(1)
+    elif len(args) == 3:
+        try:
+            start_date = datetime.strptime(args[1], "%Y-%m-%d")
+            end_date = datetime.strptime(args[2], "%Y-%m-%d")
+        except Exception as e:
+            print("日期格式错误，应为 YYYY-MM-DD")
+            sys.exit(1)
+    elif len(args) == 2:
+        protocol = args[1].lower()
+    elif len(args) != 1:
+        print("用法: python mail_client.py [起始日期 结束日期] [imap|pop3]")
+        sys.exit(1)
     client = MailClient()
-    client.process_emails() 
+    if protocol == "pop3":
+        client.process_emails_pop3(start_date, end_date)
+    else:
+        client.process_emails(start_date, end_date) 

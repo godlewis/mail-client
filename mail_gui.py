@@ -1,13 +1,14 @@
 import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QTableWidget, QTableWidgetItem, QTextEdit, 
-                            QLabel, QPushButton, QHeaderView, QSplitter, QMenu)
+                            QLabel, QPushButton, QHeaderView, QSplitter, QMenu, QComboBox, QDateEdit)
 from PyQt6.QtCore import Qt, QDateTime
 from PyQt6.QtGui import QFont, QIcon, QPalette, QColor, QAction
 import mysql.connector
 from datetime import datetime
 import logging
 import re
+from mail_client import MailClient
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -81,6 +82,48 @@ class MailClientGUI(QMainWindow):
         # 创建主布局
         main_layout = QVBoxLayout(main_widget)
         
+        # ===== 新增：收取邮件功能区 =====
+        fetch_widget = QWidget()
+        fetch_layout = QHBoxLayout(fetch_widget)
+        fetch_layout.setContentsMargins(0, 0, 0, 0)
+        fetch_layout.setSpacing(10)
+
+        self.protocol_combo = QComboBox()
+        self.protocol_combo.addItems(["IMAP", "POP3"])
+        self.protocol_combo.setCurrentIndex(1)
+        fetch_layout.addWidget(QLabel("协议："))
+        fetch_layout.addWidget(self.protocol_combo)
+
+        self.start_date_edit = QDateEdit()
+        self.start_date_edit.setCalendarPopup(True)
+        self.start_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.start_date_edit.setDateTime(QDateTime.currentDateTime().addMonths(-1))
+        fetch_layout.addWidget(QLabel("起始日期："))
+        fetch_layout.addWidget(self.start_date_edit)
+
+        self.end_date_edit = QDateEdit()
+        self.end_date_edit.setCalendarPopup(True)
+        self.end_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.end_date_edit.setDateTime(QDateTime.currentDateTime())
+        fetch_layout.addWidget(QLabel("结束日期："))
+        fetch_layout.addWidget(self.end_date_edit)
+
+        self.fetch_button = QPushButton("收取邮件")
+        self.fetch_button.clicked.connect(self.on_fetch_mail)
+        fetch_layout.addWidget(self.fetch_button)
+
+        # 新增：刷新邮件列表按钮
+        self.refresh_button = QPushButton("刷新邮件列表")
+        self.refresh_button.clicked.connect(self.load_mail_list)
+        fetch_layout.addWidget(self.refresh_button)
+
+        # 新增：收取状态提示label
+        self.status_label = QLabel("")
+        fetch_layout.addWidget(self.status_label)
+
+        main_layout.addWidget(fetch_widget)
+        # ===== 新增功能区结束 =====
+        
         # 创建分割器
         splitter = QSplitter(Qt.Orientation.Vertical)
         main_layout.addWidget(splitter)
@@ -107,24 +150,37 @@ class MailClientGUI(QMainWindow):
         # 邮件头部信息
         header_widget = QWidget()
         header_layout = QVBoxLayout(header_widget)
-        
-        self.sender_label = SelectableLabel("发件人：")
+        header_layout.setSpacing(4)
+        header_layout.setContentsMargins(8, 8, 8, 8)
+
+        # 主题单独一行，字体加粗加大
         self.subject_label = SelectableLabel("主题：")
-        self.date_label = SelectableLabel("时间：")
-        self.recipients_label = SelectableLabel("收件人：")
-        self.cc_label = SelectableLabel("抄送：")
-        
-        # 设置标签字体
-        font = QFont()
-        font.setBold(True)
-        for label in [self.sender_label, self.subject_label, self.date_label, 
-                     self.recipients_label, self.cc_label]:
-            label.setFont(font)
-        
-        header_layout.addWidget(self.sender_label)
+        subject_font = QFont()
+        subject_font.setBold(True)
+        subject_font.setPointSize(13)
+        self.subject_label.setFont(subject_font)
         header_layout.addWidget(self.subject_label)
-        header_layout.addWidget(self.date_label)
+
+        # 发件人和时间一行
+        sender_time_widget = QWidget()
+        sender_time_layout = QHBoxLayout(sender_time_widget)
+        sender_time_layout.setSpacing(10)
+        sender_time_layout.setContentsMargins(0, 0, 0, 0)
+        self.sender_label = SelectableLabel("发件人：")
+        self.date_label = SelectableLabel("时间：")
+        sender_time_layout.addWidget(self.sender_label)
+        sender_time_layout.addWidget(self.date_label)
+        sender_time_layout.addStretch()
+        header_layout.addWidget(sender_time_widget)
+
+        # 收件人单独一行，可换行
+        self.recipients_label = SelectableLabel("收件人：")
+        self.recipients_label.setWordWrap(True)
         header_layout.addWidget(self.recipients_label)
+
+        # 抄送单独一行，可换行
+        self.cc_label = SelectableLabel("抄送：")
+        self.cc_label.setWordWrap(True)
         header_layout.addWidget(self.cc_label)
         
         # 邮件内容
@@ -178,33 +234,37 @@ class MailClientGUI(QMainWindow):
             
     def load_mail_list(self):
         """加载邮件列表"""
-        cursor = self.conn.cursor()
+        # 每次都新建连接，确保数据最新
+        conn = mysql.connector.connect(
+            host='127.0.0.1',
+            port=3306,
+            user='root',
+            password='root',
+            database='mymail'
+        )
+        cursor = conn.cursor()
         try:
             cursor.execute("""
                 SELECT message_id, subject, sender, received_date 
                 FROM emails 
                 ORDER BY received_date DESC
             """)
-            
             self.mail_list.setRowCount(0)
             for row in cursor.fetchall():
                 message_id, subject, sender, received_date = row
                 row_position = self.mail_list.rowCount()
                 self.mail_list.insertRow(row_position)
-                
-                # 设置单元格内容
                 self.mail_list.setItem(row_position, 0, QTableWidgetItem(sender))
                 self.mail_list.setItem(row_position, 1, QTableWidgetItem(subject))
                 self.mail_list.setItem(row_position, 2, QTableWidgetItem(
                     received_date.strftime("%Y-%m-%d %H:%M")))
                 self.mail_list.setItem(row_position, 3, QTableWidgetItem(message_id))
-            
             logger.info(f"成功加载 {self.mail_list.rowCount()} 封邮件")
-                
         except Exception as e:
             logger.error(f"加载邮件列表失败: {str(e)}")
         finally:
             cursor.close()
+            conn.close()
             
     def is_html_content(self, content):
         """判断内容是否为HTML格式"""
@@ -235,11 +295,9 @@ class MailClientGUI(QMainWindow):
         selected_rows = self.mail_list.selectedItems()
         if not selected_rows:
             return
-            
         row = selected_rows[0].row()
         message_id = self.mail_list.item(row, 3).text()
         logger.info(f"选择邮件: {message_id}")
-        
         cursor = self.conn.cursor()
         try:
             cursor.execute("""
@@ -247,14 +305,12 @@ class MailClientGUI(QMainWindow):
                 FROM emails 
                 WHERE message_id = %s
             """, (message_id,))
-            
             row = cursor.fetchone()
             if row:
                 subject, sender, recipients, cc, content, received_date = row
-                
                 # 更新邮件信息
-                self.sender_label.setText(f"发件人：{sender}")
                 self.subject_label.setText(f"主题：{subject}")
+                self.sender_label.setText(f"发件人：{sender}")
                 self.date_label.setText(f"时间：{received_date.strftime('%Y-%m-%d %H:%M:%S')}")
                 self.recipients_label.setText(f"收件人：{recipients}")
                 self.cc_label.setText(f"抄送：{cc}")
@@ -277,6 +333,25 @@ class MailClientGUI(QMainWindow):
             self.content_text.setPlainText(f"加载邮件内容失败: {str(e)}")
         finally:
             cursor.close()
+
+    def on_fetch_mail(self):
+        """点击收取邮件按钮，调用MailClient收取邮件"""
+        self.status_label.setText("正在收取邮件，请稍候...")
+        QApplication.processEvents()  # 立即刷新界面
+        protocol = self.protocol_combo.currentText().lower()
+        start_date = self.start_date_edit.date().toPyDate()
+        end_date = self.end_date_edit.date().toPyDate()
+        # 转为datetime对象
+        start_dt = datetime.combine(start_date, datetime.min.time())
+        end_dt = datetime.combine(end_date, datetime.max.time())
+        logger.info(f"开始收取邮件，协议: {protocol}, 起始: {start_dt}, 结束: {end_dt}")
+        client = MailClient()
+        if protocol == "pop3":
+            client.process_emails_pop3(start_dt, end_dt)
+        else:
+            client.process_emails(start_dt, end_dt)
+        self.load_mail_list()
+        self.status_label.setText("")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
